@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Page title</title>
+</head>
+<body>
+    <center>
+    <h1>download any social media video</h>
+    
+    <h3>paste any video Link from social media</h3>
+    
+    <input type="text" id="link" placeholder="paste link.."> <br>
+    
+    <br><button id="submit" onclick="download ()" type="button" >download</button>
+    
+    <div id="complete"></div>
+    </center>
+    
+    <script>
+        function download (){
+            const link = document.getElementById("link").value;
+            console.log(link)
+            const Formdata = new FormData();
+            Formdata.append('link', link);
+           
+            
+            fetch(`/download_video/`,{
+                method: "POST",
+                body: Formdata
+            }) .then(res => res.json())
+               .then(data =>{
+                   alert("video is complete download", data.link);
+               })
+            
+        }
+    </script>
+</body>
+</html>

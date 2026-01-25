@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Page title</title>
+</head>
+<body>
+    <center>
+    <h1>create account</h1>
+    <form method="POST">
+           {% csrf_token %}
+        <input name="username" type ="text" placeholder ="write name">
+        <br><br>
+        <input name="email" type ="email" placeholder ="write email">
+        <br><br>
+        <input name="password" type ="password" placeholder ="write password">
+        <br><br>
+        <input name="confirm_password" type ="password" placeholder ="write confirm_password">
+        <br><br>
+        <button type ="submit">register</button>
+    </form>
+    </center>
+</body>
+</html>

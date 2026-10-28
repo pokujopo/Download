@@ -1,0 +1,83 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  *, *::before, *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background-color: #0B132B;
+    color: #F0F4FF;
+    min-height: 100vh;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar       { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: #0B132B; }
+  ::-webkit-scrollbar-thumb { background: #FF6600; border-radius: 99px; }
+
+  /* Focus ring */
+  *:focus-visible {
+    outline: 2px solid #FF6600;
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* Stagger animation helpers */
+  .stagger-1  { animation-delay: 0ms;   }
+  .stagger-2  { animation-delay: 60ms;  }
+  .stagger-3  { animation-delay: 120ms; }
+  .stagger-4  { animation-delay: 180ms; }
+  .stagger-5  { animation-delay: 240ms; }
+  .stagger-6  { animation-delay: 300ms; }
+
+  /* Shimmer skeleton */
+  .skeleton {
+    background: linear-gradient(
+      90deg,
+      rgba(255,255,255,0.05) 25%,
+      rgba(255,255,255,0.09) 50%,
+      rgba(255,255,255,0.05) 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+    border-radius: 8px;
+  }
+
+  /* Progress bar glow tip */
+  .progress-tip::after {
+    content: '';
+    position: absolute;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #FF8533;
+    box-shadow: 0 0 10px #FF6600, 0 0 20px rgba(255,102,0,0.5);
+  }
+
+  /* Active nav indicator */
+  .nav-active-bar::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 20%;
+    height: 60%;
+    width: 3px;
+    background: #FF6600;
+    border-radius: 0 4px 4px 0;
+  }
+}

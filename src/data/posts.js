@@ -1,0 +1,48 @@
+/** @type {import('@/types').Post[]} */
+export const MOCK_POSTS = [
+  {
+    id: 1,
+    caption: 'Launching our new product line 🚀 — biggest drop of the year!',
+    platforms: ['YouTube', 'Facebook', 'X'],
+    status: 'success',
+    type: 'video',
+    date: '2025-03-25',
+    views: 12400,
+  },
+  {
+    id: 2,
+    caption: 'Behind the scenes of our team offsite in Lisbon',
+    platforms: ['Facebook', 'X'],
+    status: 'success',
+    type: 'image',
+    date: '2025-03-23',
+    views: 8750,
+  },
+  {
+    id: 3,
+    caption: 'Weekly tips for productivity — Episode 7: Deep Work',
+    platforms: ['YouTube'],
+    status: 'failed',
+    type: 'video',
+    date: '2025-03-22',
+    views: 0,
+  },
+  {
+    id: 4,
+    caption: 'Q1 recap: our biggest wins and what we learned',
+    platforms: ['YouTube', 'X'],
+    status: 'success',
+    type: 'image',
+    date: '2025-03-20',
+    views: 5230,
+  },
+  {
+    id: 5,
+    caption: 'Join us live this Friday — exclusive AMA session!',
+    platforms: ['Facebook'],
+    status: 'pending',
+    type: 'image',
+    date: '2025-03-18',
+    views: 320,
+  },
+]

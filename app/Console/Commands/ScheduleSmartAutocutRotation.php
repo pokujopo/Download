@@ -1,0 +1,306 @@
+<?php
+
+namespace App\Console\Commands;
+
+use Carbon\CarbonImmutable;
+use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
+
+class ScheduleSmartAutocutRotation extends Command
+{
+    protected $signature = 'smart-autocut:schedule-rotation
+                            {--dry-run : Preview without saving scheduled posts}';
+
+    protected $description =
+        'Schedule Smart Autocut clips in daily rotation without repeating a clip per account.';
+
+    private const TIMEZONE = 'Africa/Dar_es_Salaam';
+
+    private const DAILY_SLOTS = [
+        [9, 0],
+        [14, 0],
+        [19, 0],
+    ];
+
+    private const ACTIVE_STATUSES = [
+        'scheduled',
+        'queued',
+        'processing',
+        'publishing',
+        'published',
+    ];
+
+    public function handle(): int
+    {
+        foreach ([
+            'contents',
+            'content_media',
+            'social_accounts',
+            'content_destinations',
+        ] as $table) {
+            if (! DB::getSchemaBuilder()->hasTable($table)) {
+                $this->error("Required database table missing: {$table}");
+
+                return self::FAILURE;
+            }
+        }
+
+        $now = CarbonImmutable::now(self::TIMEZONE);
+        $today = $now->startOfDay();
+        $dryRun = (bool) $this->option('dry-run');
+
+        $clips = DB::table('contents as c')
+            ->where('c.source', 'smart_autocut')
+            ->whereExists(function ($query) {
+                $query->selectRaw('1')
+                    ->from('content_media as cm')
+                    ->whereColumn('cm.content_id', 'c.id')
+                    ->where('cm.type', 'video')
+                    ->whereNotNull('cm.public_url');
+            })
+            ->orderBy('c.id')
+            ->get([
+                'c.id',
+                'c.user_id',
+                'c.source_clip_id',
+            ]);
+
+        if ($clips->isEmpty()) {
+            $this->warn('Hakuna clips za Smart Autocut zenye video URL zilizopatikana.');
+
+            return self::SUCCESS;
+        }
+
+        $scheduledCount = 0;
+
+        $this->info('PHP local time: ' . $now->format('Y-m-d H:i:s T'));
+        $this->info('Mode: ' . ($dryRun ? 'DRY-RUN' : 'LIVE SCHEDULING'));
+        $this->newLine();
+
+        foreach ($clips->groupBy('user_id') as $userId => $userClips) {
+            $accounts = DB::table('social_accounts')
+                ->where('user_id', $userId)
+                ->where('status', 'active')
+                ->orderBy('id')
+                ->get(['id', 'provider']);
+
+            if ($accounts->isEmpty()) {
+                $this->warn("User {$userId}: hakuna social account active.");
+                continue;
+            }
+
+            foreach ($accounts as $account) {
+                $accountScheduled = 0;
+
+                $daysToCheck = max(
+                    30,
+                    (int) ceil($userClips->count() / 3) + 14
+                );
+
+                $rangeStart = $today
+                    ->utc()
+                    ->format('Y-m-d H:i:s');
+
+                $rangeEnd = $today
+                    ->addDays($daysToCheck + 1)
+                    ->utc()
+                    ->format('Y-m-d H:i:s');
+
+                // Load existing account activity once. The same in-memory
+                // counters are updated after each clip, including dry-run.
+                $existing = DB::table('content_destinations')
+                    ->where('social_account_id', $account->id)
+                    ->whereIn('status', self::ACTIVE_STATUSES)
+                    ->where(function ($query) use ($rangeStart, $rangeEnd) {
+                        $query->where(function ($q) use ($rangeStart, $rangeEnd) {
+                            $q->whereNotNull('scheduled_at')
+                                ->where('scheduled_at', '>=', $rangeStart)
+                                ->where('scheduled_at', '<', $rangeEnd);
+                        })->orWhere(function ($q) use ($rangeStart, $rangeEnd) {
+                            $q->whereNotNull('published_at')
+                                ->where('published_at', '>=', $rangeStart)
+                                ->where('published_at', '<', $rangeEnd);
+                        });
+                    })
+                    ->get([
+                        'status',
+                        'scheduled_at',
+                        'published_at',
+                    ]);
+
+                $dailyCounts = [];
+                $occupiedSlots = [];
+
+                foreach ($existing as $destination) {
+                    $timestamp = $destination->status === 'published'
+                        ? ($destination->published_at ?? $destination->scheduled_at)
+                        : ($destination->scheduled_at ?? $destination->published_at);
+
+                    if (! $timestamp) {
+                        continue;
+                    }
+
+                    $time = CarbonImmutable::parse($timestamp, 'UTC')
+                        ->setTimezone(self::TIMEZONE);
+
+                    $dayKey = $time->format('Y-m-d');
+                    $slotKey = $time->format('Y-m-d H:i:s');
+
+                    $dailyCounts[$dayKey] =
+                        ($dailyCounts[$dayKey] ?? 0) + 1;
+
+                    $occupiedSlots[$slotKey] = true;
+                }
+
+                foreach ($userClips as $clip) {
+                    // A clip must never be assigned twice to this same
+                    // social account, regardless of destination status.
+                    $alreadyAssigned = DB::table('content_destinations')
+                        ->where('content_id', $clip->id)
+                        ->where('social_account_id', $account->id)
+                        ->exists();
+
+                    if ($alreadyAssigned) {
+                        $this->line(
+                            "SKIP {$clip->source_clip_id}: tayari ina destination "
+                            . "kwa account {$account->id}."
+                        );
+
+                        continue;
+                    }
+
+                    $chosenSlot = null;
+
+                    for ($offset = 0; $offset <= $daysToCheck; $offset++) {
+                        $day = $today->addDays($offset);
+                        $dayKey = $day->format('Y-m-d');
+
+                        if (($dailyCounts[$dayKey] ?? 0) >= 3) {
+                            continue;
+                        }
+
+                        foreach (self::DAILY_SLOTS as [$hour, $minute]) {
+                            $slot = $day->setTime($hour, $minute);
+
+                            if ($slot->lessThanOrEqualTo($now)) {
+                                continue;
+                            }
+
+                            $slotKey = $slot->format('Y-m-d H:i:s');
+
+                            if (isset($occupiedSlots[$slotKey])) {
+                                continue;
+                            }
+
+                            $chosenSlot = $slot;
+                            break 2;
+                        }
+                    }
+
+                    if (! $chosenSlot) {
+                        $this->error(
+                            "Hakuna slot ya bure iliyopatikana kwa {$clip->source_clip_id}."
+                        );
+
+                        continue;
+                    }
+
+                    $scheduledAtUtc = $chosenSlot
+                        ->utc()
+                        ->format('Y-m-d H:i:s');
+
+                    $this->line(sprintf(
+                        "%s | clip=%s | account=%s (%s) | %s EAT",
+                        $dryRun ? 'DRY-RUN' : 'SCHEDULE',
+                        $clip->source_clip_id,
+                        $account->id,
+                        $account->provider,
+                        $chosenSlot->format('Y-m-d H:i')
+                    ));
+
+                    $created = true;
+
+                    if (! $dryRun) {
+                        $created = DB::transaction(function () use (
+                            $clip,
+                            $account,
+                            $scheduledAtUtc
+                        ) {
+                            if (DB::table('content_destinations')
+                                ->where('content_id', $clip->id)
+                                ->where('social_account_id', $account->id)
+                                ->exists()) {
+                                return false;
+                            }
+
+                            $timestamp = now('UTC')->format('Y-m-d H:i:s');
+
+                            DB::table('content_destinations')->insert([
+                                'content_id' => $clip->id,
+                                'social_account_id' => $account->id,
+                                'provider' => $account->provider,
+                                'status' => 'scheduled',
+                                'scheduled_at' => $scheduledAtUtc,
+                                'attempts' => 0,
+                                'created_at' => $timestamp,
+                                'updated_at' => $timestamp,
+                            ]);
+
+                            DB::table('contents')
+                                ->where('id', $clip->id)
+                                ->where('status', 'draft')
+                                ->update([
+                                    'status' => 'scheduled',
+                                    'scheduled_at' => $scheduledAtUtc,
+                                    'updated_at' => $timestamp,
+                                ]);
+
+                            return true;
+                        });
+                    }
+
+                    if (! $created) {
+                        $this->warn(
+                            "SKIP {$clip->source_clip_id}: destination tayari imeundwa."
+                        );
+
+                        continue;
+                    }
+
+                    // Reserve this slot in memory. This is what prevents
+                    // every clip in a dry-run from receiving the same time.
+                    $dayKey = $chosenSlot->format('Y-m-d');
+                    $slotKey = $chosenSlot->format('Y-m-d H:i:s');
+
+                    $dailyCounts[$dayKey] =
+                        ($dailyCounts[$dayKey] ?? 0) + 1;
+
+                    $occupiedSlots[$slotKey] = true;
+
+                    $scheduledCount++;
+                    $accountScheduled++;
+                }
+
+                $this->info(
+                    "Account {$account->id}: {$accountScheduled} "
+                    . ($dryRun ? 'slot(s) zilizokaguliwa.' : 'post(s) zilizopangwa.')
+                );
+
+                $this->newLine();
+            }
+        }
+
+        if ($dryRun) {
+            $this->info(
+                "DRY-RUN complete: {$scheduledCount} slot(s). "
+                . 'Hakuna mabadiliko yaliyohifadhiwa.'
+            );
+        } else {
+            $this->info(
+                "Rotation complete: {$scheduledCount} destination(s) zimepangwa."
+            );
+        }
+
+        return self::SUCCESS;
+    }
+}

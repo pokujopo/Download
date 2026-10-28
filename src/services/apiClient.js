@@ -3,7 +3,7 @@ import axios from 'axios'
 
 const BASE_URL =
   import.meta.env.VITE_API_BASE_URL ||
-  'https://1080-196-249-92-243.ngrok-free.app'
+  'https://smartcut.labill.online'
 
 const apiClient = axios.create({
   baseURL: BASE_URL,

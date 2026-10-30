@@ -9,6 +9,7 @@ use App\Domain\Social\Webhooks\WebhookSignatureVerifierResolver;
 use App\Infrastructure\Social\DefaultSocialProviderResolver;
 use App\Infrastructure\Social\Facebook\FacebookProvider;
 use App\Infrastructure\Social\Instagram\InstagramProvider;
+use App\Infrastructure\Social\YouTube\YouTubeProvider;
 use App\Infrastructure\Social\Webhooks\DefaultWebhookSignatureVerifierResolver;
 use App\Infrastructure\Social\Webhooks\MetaWebhookSignatureVerifier;
 use App\Infrastructure\Storage\LaravelMediaStorage;
@@ -38,6 +39,10 @@ class AppServiceProvider extends ServiceProvider
 
                 'instagram' => $app->make(
                     InstagramProvider::class
+                ),
+
+                'youtube' => $app->make(
+                    YouTubeProvider::class
                 ),
             ])
         );

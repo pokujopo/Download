@@ -1,0 +1,238 @@
+<?php
+
+namespace App\Infrastructure\Social\YouTube;
+
+use App\Domain\Social\Enums\SocialAccountStatus;
+use App\Models\SocialAccount;
+use Google\Client;
+use Google\Http\MediaFileUpload;
+use Google\Service\YouTube;
+use Google\Service\YouTube\Video;
+use Google\Service\YouTube\VideoSnippet;
+use Google\Service\YouTube\VideoStatus;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
+use RuntimeException;
+use Throwable;
+
+final class YouTubeApiClient
+{
+    private const CHUNK_SIZE = 1048576;
+
+    public function uploadVideo(
+        SocialAccount $account,
+        string $publicUrl,
+        string $caption,
+        array $metadata = [],
+    ): array {
+        $accessToken = $this->ensureAccessToken($account);
+        $temporaryPath = tempnam(sys_get_temp_dir(), 'smartcut-youtube-');
+
+        if ($temporaryPath === false) {
+            throw new RuntimeException('Could not create a temporary video file on the server.');
+        }
+
+        try {
+            $this->downloadVideo($publicUrl, $temporaryPath);
+            $fileSize = filesize($temporaryPath);
+            if (!is_int($fileSize) || $fileSize <= 0) {
+                throw new RuntimeException('The source video downloaded as an empty file.');
+            }
+
+            $client = new Client();
+            $client->setApplicationName((string) config('app.name', 'Smart Autocut'));
+            $client->setClientId((string) config('services.youtube.client_id'));
+            $client->setClientSecret((string) config('services.youtube.client_secret'));
+            $client->setScopes(['https://www.googleapis.com/auth/youtube.upload']);
+            $client->setAccessToken([
+                'access_token' => $accessToken,
+                'created' => time(),
+                'expires_in' => 3600,
+            ]);
+            $client->setHttpClient(new \GuzzleHttp\Client([
+                'timeout' => 1200,
+                'connect_timeout' => 30,
+            ]));
+
+            $title = trim((string) ($metadata['youtube_title'] ?? $metadata['title'] ?? ''));
+            if ($title === '') {
+                $title = trim(preg_replace('/\s+/u', ' ', strip_tags($caption)) ?? '');
+            }
+            if ($title === '') {
+                $title = 'Smart Autocut Short';
+            }
+            $title = Str::limit($title, 100, '');
+            $description = Str::limit(trim($caption), 5000, '');
+            $privacyStatus = strtolower((string) config('services.youtube.default_privacy_status', 'private'));
+            if (!in_array($privacyStatus, ['private', 'unlisted', 'public'], true)) {
+                throw new RuntimeException('YOUTUBE_DEFAULT_PRIVACY_STATUS must be private, unlisted, or public.');
+            }
+
+            $snippet = new VideoSnippet();
+            $snippet->setTitle($title);
+            $snippet->setDescription($description);
+            $snippet->setCategoryId((string) config('services.youtube.category_id', '22'));
+
+            $tags = $metadata['youtube_tags'] ?? $metadata['tags'] ?? [];
+            if (is_array($tags)) {
+                $tags = array_values(array_filter(array_map(
+                    static fn ($tag) => is_string($tag) ? trim($tag) : '',
+                    $tags
+                ), static fn (string $tag) => $tag !== ''));
+                if ($tags !== []) {
+                    $snippet->setTags(array_slice($tags, 0, 30));
+                }
+            }
+
+            $videoStatus = new VideoStatus();
+            $videoStatus->setPrivacyStatus($privacyStatus);
+
+            $video = new Video();
+            $video->setSnippet($snippet);
+            $video->setStatus($videoStatus);
+
+            $client->setDefer(true);
+            try {
+                $youtube = new YouTube($client);
+                $insertRequest = $youtube->videos->insert('snippet,status', $video);
+                $upload = new MediaFileUpload(
+                    $client,
+                    $insertRequest,
+                    'video/mp4',
+                    null,
+                    true,
+                    self::CHUNK_SIZE
+                );
+                $upload->setFileSize($fileSize);
+
+                $handle = fopen($temporaryPath, 'rb');
+                if ($handle === false) {
+                    throw new RuntimeException('Could not read the temporary video file.');
+                }
+
+                try {
+                    $uploadStatus = false;
+                    while (!$uploadStatus && !feof($handle)) {
+                        $chunk = fread($handle, self::CHUNK_SIZE);
+                        if ($chunk === false) {
+                            throw new RuntimeException('Could not read the next video upload chunk.');
+                        }
+                        $uploadStatus = $upload->nextChunk($chunk);
+                    }
+                } finally {
+                    fclose($handle);
+                }
+            } finally {
+                $client->setDefer(false);
+            }
+
+            if ($uploadStatus instanceof Video) {
+                $videoId = $uploadStatus->getId();
+                $uploadedTitle = $uploadStatus->getSnippet()?->getTitle() ?? $title;
+                $uploadedPrivacy = $uploadStatus->getStatus()?->getPrivacyStatus() ?? $privacyStatus;
+            } elseif (is_array($uploadStatus)) {
+                $videoId = $uploadStatus['id'] ?? null;
+                $uploadedTitle = $uploadStatus['snippet']['title'] ?? $title;
+                $uploadedPrivacy = $uploadStatus['status']['privacyStatus'] ?? $privacyStatus;
+            } else {
+                $videoId = null;
+                $uploadedTitle = $title;
+                $uploadedPrivacy = $privacyStatus;
+            }
+
+            if (!is_string($videoId) || $videoId === '') {
+                throw new RuntimeException('YouTube upload ended without returning a video ID.');
+            }
+
+            return [
+                'video_id' => $videoId,
+                'title' => $uploadedTitle,
+                'privacy_status' => $uploadedPrivacy,
+                'url' => 'https://www.youtube.com/watch?v=' . $videoId,
+            ];
+        } finally {
+            if (is_file($temporaryPath)) {
+                @unlink($temporaryPath);
+            }
+        }
+    }
+
+    private function ensureAccessToken(SocialAccount $account): string
+    {
+        if (!$account->access_token) {
+            $account->update(['status' => SocialAccountStatus::REAUTHORIZATION_REQUIRED]);
+            throw new RuntimeException('YouTube reauthorization is required because the access token is missing. Reconnect the channel.');
+        }
+
+        if ($account->token_expires_at && $account->token_expires_at->isAfter(now()->addMinutes(5))) {
+            return (string) $account->access_token;
+        }
+
+        if (!$account->refresh_token) {
+            $account->update(['status' => SocialAccountStatus::REAUTHORIZATION_REQUIRED]);
+            throw new RuntimeException('YouTube reauthorization is required because the refresh token is missing. Reconnect the channel.');
+        }
+
+        $response = Http::asForm()
+            ->acceptJson()
+            ->timeout(30)
+            ->post('https://oauth2.googleapis.com/token', [
+                'client_id' => config('services.youtube.client_id'),
+                'client_secret' => config('services.youtube.client_secret'),
+                'refresh_token' => $account->refresh_token,
+                'grant_type' => 'refresh_token',
+            ]);
+
+        $body = $response->json() ?? [];
+        if (!$response->successful()) {
+            if (($body['error'] ?? null) === 'invalid_grant') {
+                $account->update(['status' => SocialAccountStatus::REAUTHORIZATION_REQUIRED]);
+                throw new RuntimeException('YouTube reauthorization is required. Reconnect the channel.');
+            }
+            throw new RuntimeException(
+                'YouTube token refresh failed (HTTP ' . $response->status() . ').',
+                $response->status()
+            );
+        }
+
+        if (empty($body['access_token']) || !is_numeric($body['expires_in'] ?? null)) {
+            throw new RuntimeException('Google returned an invalid refreshed YouTube token.');
+        }
+
+        $account->update([
+            'access_token' => $body['access_token'],
+            'refresh_token' => $body['refresh_token'] ?? $account->refresh_token,
+            'token_expires_at' => now()->addSeconds((int) $body['expires_in']),
+        ]);
+        $account->refresh();
+
+        return (string) $account->access_token;
+    }
+
+    private function downloadVideo(string $url, string $destinationPath): void
+    {
+        $parts = parse_url($url);
+        if (!$parts || strtolower((string) ($parts['scheme'] ?? '')) !== 'https' || empty($parts['host'])) {
+            throw new RuntimeException('YouTube source video URL must be an HTTPS public URL.');
+        }
+
+        $host = strtolower((string) $parts['host']);
+        if (
+            in_array($host, ['localhost', 'localhost.localdomain'], true)
+            || str_ends_with($host, '.local')
+            || str_ends_with($host, '.internal')
+            || str_ends_with($host, '.localhost')
+        ) {
+            throw new RuntimeException('Local or internal URLs cannot be used as YouTube source video URLs.');
+        }
+
+        $response = Http::withOptions([
+                'sink' => $destinationPath,
+                'allow_redirects' => ['max' => 3],
+            ])
+            ->timeout(900)
+            ->connectTimeout(30)
+            ->get($url);
+        $response->throw();
+    }
+}

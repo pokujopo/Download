@@ -76,7 +76,7 @@ final class InstagramApiClient
         $response = $this->client()->get(
             "/{$containerId}",
             [
-                'fields' => 'status_code',
+                'fields' => 'status_code,status',
                 'access_token' => $accessToken,
             ]
         );

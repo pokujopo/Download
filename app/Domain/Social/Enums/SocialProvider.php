@@ -8,4 +8,5 @@ enum SocialProvider: string
     case FACEBOOK = 'facebook';
     case LINKEDIN = 'linkedin';
     case TIKTOK = 'tiktok';
+    case YOUTUBE = 'youtube';
 }

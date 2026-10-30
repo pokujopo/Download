@@ -15,6 +15,7 @@ class ContentDestination extends Model
         'provider',
         'status',
         'scheduled_at',
+        'provider_reference',
         'external_media_id',
         'error_code',
         'error_message',

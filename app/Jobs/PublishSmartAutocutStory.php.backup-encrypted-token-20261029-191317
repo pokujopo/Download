@@ -1,0 +1,274 @@
+<?php
+
+namespace App\Jobs;
+
+use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Foundation\Bus\Dispatchable;
+use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Throwable;
+
+final class PublishSmartAutocutStory implements ShouldQueue
+{
+    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+
+    // Avoid blind queue retries after Meta might have accepted a publish request.
+    public int $tries = 1;
+    public int $timeout = 150;
+
+    public function __construct(public readonly int $storyId)
+    {
+    }
+
+    public function handle(): void
+    {
+        $now = now('UTC')->format('Y-m-d H:i:s');
+        $claimed = DB::table('content_story_destinations')
+            ->where('id', $this->storyId)
+            ->where('status', 'queued')
+            ->update([
+                'status' => 'publishing',
+                'processing_started_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+        if (! $claimed) {
+            return;
+        }
+
+        $story = DB::table('content_story_destinations as s')
+            ->join('social_accounts as a', 'a.id', '=', 's.social_account_id')
+            ->where('s.id', $this->storyId)
+            ->first([
+                's.id', 's.provider', 's.media_url', 's.provider_reference',
+                'a.provider_account_id', 'a.access_token', 'a.status as account_status',
+            ]);
+
+        if (! $story) {
+            $this->failStory('SOCIAL_ACCOUNT_NOT_FOUND', 'The connected social account for this Story no longer exists.');
+            return;
+        }
+        if ($story->account_status !== 'active') {
+            $this->failStory('SOCIAL_ACCOUNT_INACTIVE', 'Reconnect or reactivate the social account before publishing Stories.');
+            return;
+        }
+        if (! $story->provider_account_id || ! $story->access_token) {
+            $this->failStory('SOCIAL_CREDENTIALS_MISSING', 'The connected social account is missing its provider ID or access token.');
+            return;
+        }
+        if (! in_array($story->provider, ['facebook', 'instagram'], true)) {
+            $this->failStory('UNSUPPORTED_PROVIDER', 'Only Facebook Page video Stories and Instagram video Stories are supported by this release.');
+            return;
+        }
+
+        try {
+            $version = (string) config('services.meta.graph_api_version', 'v26.0');
+            if (! preg_match('/^v\d+\.\d+$/', $version)) {
+                throw new \RuntimeException('services.meta.graph_api_version must look like v26.0.');
+            }
+
+            if ($story->provider === 'instagram') {
+                $this->publishInstagramStory($story, $version);
+            } else {
+                $this->publishFacebookStory($story, $version);
+            }
+        } catch (Throwable $e) {
+            Log::warning('Smart Autocut Story publishing failed.', [
+                'story_id' => $this->storyId,
+                'provider' => $story->provider,
+                'error' => $e->getMessage(),
+            ]);
+            $this->failStory('META_STORY_PUBLISH_FAILED', mb_substr($e->getMessage(), 0, 2000));
+        }
+    }
+
+    private function publishInstagramStory(object $story, string $version): void
+    {
+        $base = "https://graph.facebook.com/{$version}";
+        $token = (string) $story->access_token;
+        $accountId = rawurlencode((string) $story->provider_account_id);
+        $containerId = $story->provider_reference;
+
+        if (! $containerId) {
+            $created = Http::asForm()->acceptJson()->connectTimeout(15)->timeout(35)
+                ->post("{$base}/{$accountId}/media", [
+                    'media_type' => 'STORIES',
+                    'video_url' => $story->media_url,
+                    'access_token' => $token,
+                ]);
+            $body = $this->jsonOrThrow($created, 'Instagram Story container creation');
+            $containerId = $body['id'] ?? null;
+            if (! is_string($containerId) || $containerId === '') {
+                throw new \RuntimeException('Meta did not return an Instagram Story container ID.');
+            }
+            DB::table('content_story_destinations')->where('id', $this->storyId)->update([
+                'provider_reference' => $containerId,
+                'provider_response' => json_encode(['container_created' => true, 'container_id' => $containerId]),
+                'updated_at' => now('UTC')->format('Y-m-d H:i:s'),
+            ]);
+        }
+
+        // Give Meta a short processing window per job. If still processing, resume next minute
+        // using the saved container ID rather than creating another container or another Story.
+        $ready = false;
+        for ($i = 0; $i < 8; $i++) {
+            $statusResponse = Http::acceptJson()->connectTimeout(10)->timeout(20)
+                ->get("{$base}/" . rawurlencode((string) $containerId), [
+                    'fields' => 'status_code,status',
+                    'access_token' => $token,
+                ]);
+            $status = $this->jsonOrThrow($statusResponse, 'Instagram Story container status check');
+            $code = strtoupper((string) ($status['status_code'] ?? ''));
+
+            if ($code === 'FINISHED') {
+                $ready = true;
+                break;
+            }
+            if ($code === 'ERROR' || $code === 'EXPIRED') {
+                throw new \RuntimeException('Instagram Story container processing ended with status ' . ($code ?: 'unknown') . '. ' . ($status['status'] ?? ''));
+            }
+
+            if ($i < 7) {
+                sleep(5);
+            }
+        }
+
+        if (! $ready) {
+            DB::table('content_story_destinations')->where('id', $this->storyId)->update([
+                'status' => 'pending',
+                'error_code' => 'INSTAGRAM_CONTAINER_PROCESSING',
+                'error_message' => 'Meta is still processing the same Story container; the scheduler will resume it without creating another container.',
+                'updated_at' => now('UTC')->format('Y-m-d H:i:s'),
+            ]);
+            return;
+        }
+
+        $published = Http::asForm()->acceptJson()->connectTimeout(15)->timeout(35)
+            ->post("{$base}/{$accountId}/media_publish", [
+                'creation_id' => $containerId,
+                'access_token' => $token,
+            ]);
+        $body = $this->jsonOrThrow($published, 'Instagram Story publishing');
+        $mediaId = $body['id'] ?? null;
+        if (! is_string($mediaId) || $mediaId === '') {
+            throw new \RuntimeException('Instagram accepted the publish request but returned no media ID; inspect Meta before manually retrying.');
+        }
+
+        $this->markPublished($mediaId, $body);
+    }
+
+    private function publishFacebookStory(object $story, string $version): void
+    {
+        $base = "https://graph.facebook.com/{$version}";
+        $token = (string) $story->access_token;
+        $pageId = rawurlencode((string) $story->provider_account_id);
+        $videoId = $story->provider_reference;
+
+        if (! $videoId) {
+            $started = Http::asForm()->acceptJson()->connectTimeout(15)->timeout(35)
+                ->post("{$base}/{$pageId}/video_stories", [
+                    'upload_phase' => 'start',
+                    'access_token' => $token,
+                ]);
+            $body = $this->jsonOrThrow($started, 'Facebook Story upload initialization');
+            $videoId = $body['video_id'] ?? null;
+            $uploadUrl = $body['upload_url'] ?? null;
+            if (! is_string($videoId) || $videoId === '' || ! is_string($uploadUrl) || $uploadUrl === '') {
+                throw new \RuntimeException('Meta did not return the Facebook Story video ID and upload URL.');
+            }
+            DB::table('content_story_destinations')->where('id', $this->storyId)->update([
+                'provider_reference' => $videoId,
+                'provider_response' => json_encode(['upload_started' => true, 'video_id' => $videoId]),
+                'updated_at' => now('UTC')->format('Y-m-d H:i:s'),
+            ]);
+        } else {
+            // Never guess or reconstruct the upload URL. If the first job failed after the start phase,
+            // stop safely rather than creating a second remote upload session.
+            throw new \RuntimeException('Facebook Story upload already has a saved video ID but did not finish. Automatic restart was stopped to prevent duplicate or inconsistent Story uploads. Inspect Meta and retry deliberately.');
+        }
+
+        $parts = parse_url($uploadUrl);
+        if (! $parts || strtolower((string) ($parts['scheme'] ?? '')) !== 'https'
+            || ! in_array(strtolower((string) ($parts['host'] ?? '')), ['rupload.facebook.com'], true)) {
+            throw new \RuntimeException('Meta returned an unexpected Facebook Story upload URL; refusing to send the media there.');
+        }
+
+        $uploaded = Http::withHeaders([
+                'Authorization' => 'OAuth ' . $token,
+                'file_url' => (string) $story->media_url,
+            ])
+            ->connectTimeout(15)->timeout(60)
+            ->post($uploadUrl);
+        $uploadBody = $this->jsonOrThrow($uploaded, 'Facebook Story hosted video upload');
+        if (($uploadBody['success'] ?? false) !== true && ($uploadBody['success'] ?? null) !== 'true') {
+            throw new \RuntimeException('Facebook video Story upload did not return success=true.');
+        }
+
+        $finished = Http::asForm()->acceptJson()->connectTimeout(15)->timeout(45)
+            ->post("{$base}/{$pageId}/video_stories", [
+                'upload_phase' => 'finish',
+                'video_id' => $videoId,
+                'access_token' => $token,
+            ]);
+        $finishBody = $this->jsonOrThrow($finished, 'Facebook Story final publishing phase');
+        if (($finishBody['success'] ?? false) !== true && ($finishBody['success'] ?? null) !== 'true') {
+            throw new \RuntimeException('Facebook did not confirm the Story publish phase.');
+        }
+
+        $this->markPublished((string) $videoId, $finishBody);
+    }
+
+    private function jsonOrThrow($response, string $operation): array
+    {
+        $body = $response->json();
+        if (! $response->successful() || ! is_array($body) || isset($body['error'])) {
+            $error = is_array($body) ? ($body['error'] ?? $body) : [];
+            $message = is_array($error) ? (string) ($error['message'] ?? '') : '';
+            $code = is_array($error) ? ($error['code'] ?? null) : null;
+            throw new \RuntimeException($operation . ' failed (HTTP ' . $response->status() . ', Meta code ' . ($code ?? 'n/a') . '): ' . ($message !== '' ? $message : mb_substr((string) $response->body(), 0, 1000)));
+        }
+        return $body;
+    }
+
+    private function markPublished(string $mediaId, array $response): void
+    {
+        DB::table('content_story_destinations')->where('id', $this->storyId)->update([
+            'status' => 'published',
+            'external_media_id' => $mediaId,
+            'error_code' => null,
+            'error_message' => null,
+            'provider_response' => json_encode($response),
+            'published_at' => now('UTC')->format('Y-m-d H:i:s'),
+            'updated_at' => now('UTC')->format('Y-m-d H:i:s'),
+        ]);
+        Log::info('Smart Autocut Story published.', ['story_id' => $this->storyId, 'external_media_id' => $mediaId]);
+    }
+
+    private function failStory(string $code, string $message): void
+    {
+        DB::table('content_story_destinations')->where('id', $this->storyId)->update([
+            'status' => 'failed',
+            'error_code' => $code,
+            'error_message' => mb_substr($message, 0, 2000),
+            'updated_at' => now('UTC')->format('Y-m-d H:i:s'),
+        ]);
+    }
+
+    public function failed(Throwable $exception): void
+    {
+        // This callback runs for queue-level failures outside handle(). Preserve state if an API call
+        // may already have reached Meta; do not blindly republish a Story.
+        DB::table('content_story_destinations')->where('id', $this->storyId)
+            ->whereIn('status', ['queued', 'publishing'])
+            ->update([
+                'status' => 'failed',
+                'error_code' => 'QUEUE_JOB_FAILED',
+                'error_message' => mb_substr($exception->getMessage(), 0, 2000),
+                'updated_at' => now('UTC')->format('Y-m-d H:i:s'),
+            ]);
+    }
+}

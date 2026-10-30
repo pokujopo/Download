@@ -5,6 +5,8 @@ use App\Http\Controllers\ContentController;
 use App\Http\Controllers\SmartAutocutImportController;
 use App\Http\Controllers\Social\FacebookOAuthController;
 use App\Http\Controllers\Social\InstagramOAuthController;
+use App\Http\Controllers\Social\YouTubeOAuthController;
+use App\Http\Controllers\Social\TikTokOAuthController;
 use App\Http\Controllers\SocialAccountController;
 use App\Http\Controllers\Webhook\SocialWebhookController;
 use Illuminate\Http\Request;
@@ -30,6 +32,9 @@ Route::middleware('auth:api')->group(function () {
     Route::get('/social/facebook/options',[FacebookOAuthController::class, 'options']);
     Route::post('/social/facebook/select',[FacebookOAuthController::class, 'select']);
     Route::get('/social/instagram/connect',[InstagramOAuthController::class, 'redirect']);
+    Route::get('/social/youtube/connect', [YouTubeOAuthController::class, 'connect']);
+    Route::get('/social/tiktok/connect', [TikTokOAuthController::class, 'connect']);
+    Route::get('/social/tiktok/creator-info', [TikTokOAuthController::class, 'creatorInfo']);
 
     Route::post('/smart-autocut/import-clip', [SmartAutocutImportController::class, 'importClip']);
 

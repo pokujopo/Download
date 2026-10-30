@@ -48,6 +48,11 @@ return [
 
         'webhook_verify_token' =>
             env('META_WEBHOOK_VERIFY_TOKEN'),
+        'graph_api_version' => env('META_GRAPH_API_VERSION', 'v26.0'),
+        'stories_enabled' => filter_var(env('SMARTCUT_STORIES_ENABLED', false), FILTER_VALIDATE_BOOL),
+        'stories_enabled_since' => env('SMARTCUT_STORIES_ENABLED_SINCE'),
+        'instagram_story_account_id' => env('SMARTCUT_INSTAGRAM_STORY_ACCOUNT_ID', ''),
+        'instagram_story_page_social_account_id' => (int) env('SMARTCUT_INSTAGRAM_STORY_PAGE_SOCIAL_ACCOUNT_ID', 0),
     ],
 
     /*
@@ -127,4 +132,24 @@ return [
             env('FACEBOOK_LOGIN_CONFIG_ID'),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | YouTube Data API
+    |--------------------------------------------------------------------------
+    */
+    'youtube' => [
+        'client_id' => env('GOOGLE_YOUTUBE_CLIENT_ID'),
+        'client_secret' => env('GOOGLE_YOUTUBE_CLIENT_SECRET'),
+        'redirect_uri' => env('GOOGLE_YOUTUBE_REDIRECT_URI'),
+        'default_privacy_status' => env('YOUTUBE_DEFAULT_PRIVACY_STATUS', 'private'),
+        'category_id' => env('YOUTUBE_CATEGORY_ID', '22'),
+        'autopublish_enabled' => filter_var(env('YOUTUBE_AUTOPUBLISH_ENABLED', false), FILTER_VALIDATE_BOOL),
+    ],
+
+
+    'tiktok' => [
+        'client_key' => env('TIKTOK_CLIENT_KEY'),
+        'client_secret' => env('TIKTOK_CLIENT_SECRET'),
+        'redirect_uri' => env('TIKTOK_REDIRECT_URI'),
+    ],
 ];

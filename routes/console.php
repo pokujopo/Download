@@ -19,4 +19,7 @@ Schedule::command('posts:dispatch-scheduled')
 Schedule::command('smart-autocut:schedule-rotation')
     ->everyMinute()
     ->withoutOverlapping();
-    
+
+Schedule::command('smart-autocut:dispatch-stories')
+    ->everyMinute()
+    ->withoutOverlapping();
